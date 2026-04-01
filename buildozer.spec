@@ -5,7 +5,7 @@ package.domain = org.spark
 source.dir = .
 source.include_exts = py,png,jpg,kv,db
 version = 1.0.1
-requirements = python3,kivy==2.3.0,fpdf,pillow,pyjnius,android,setuptools,sh
+requirements = python3,kivy==2.3.0,fpdf,pillow,pyjnius,android,sqlite3,hostpython3,setuptools,sh
 
 # Android permissions (Storage for PDF/JPG export, Bluetooth for POS)
 android.permissions = WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE, MANAGE_EXTERNAL_STORAGE, BLUETOOTH, BLUETOOTH_ADMIN, BLUETOOTH_CONNECT, BLUETOOTH_SCAN, INTERNET
