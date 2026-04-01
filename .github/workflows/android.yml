@@ -64,9 +64,9 @@ jobs:
       - name: Build with Buildozer
         run: |
           export PATH=$PATH:$HOME/.local/bin
-          # Force clean buildozer state
-          rm -rf .buildozer
-          yes | buildozer -v android debug
+          # Clean any partial build but keep downloads if possible (though we deleted .buildozer above)
+          # We'll use a more reliable way to run buildozer
+          buildozer android debug || (tail -n 1000 .buildozer/android/platform/build-armeabi-v7a_arm64-v8a/dists/sparkbilling__armeabi-v7a_arm64-v8a/build.log && exit 1)
 
       - name: Upload APK
         if: success()
@@ -80,4 +80,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: buildozer-logs
-          path: .buildozer/android/platform/build-armeabi-v7a_arm64-v8a/dists/sparkbilling__armeabi-v7a_arm64-v8a/build.log
+          path: .buildozer/android/platform/build-armeabi-v7a_arm64-v8a/dists/*/build.log
