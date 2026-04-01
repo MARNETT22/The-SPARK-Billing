@@ -1,0 +1,9 @@
+.buildozer/
+bin/
+*.pyc
+__pycache__/
+.DS_Store
+.idea/
+.vscode/
+spark_billing.db
+settings.json

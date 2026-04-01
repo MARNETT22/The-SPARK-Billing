@@ -1,0 +1,1427 @@
+import tkinter as tk
+from tkinter import messagebox, ttk, filedialog
+import csv
+import os
+import shutil
+import hashlib
+from datetime import datetime
+from fpdf import FPDF
+import tempfile
+import json
+import sqlite3
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        fitz = None
+except Exception:
+    fitz = None
+
+def get_fitz():
+    """Double check fitz availability at runtime."""
+    global fitz
+    if fitz: return fitz
+    try:
+        import fitz
+        return fitz
+    except:
+        try:
+            import pymupdf as fitz
+            return fitz
+        except:
+            return None
+try:
+    from PIL import Image as PILImage, ImageTk
+except:
+    PILImage = None
+    ImageTk = None
+
+# --- Settings ---
+DB_FILE = "spark_billing.db"
+CSV_MIGRATE_FILE = "school_database.csv"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
+def load_settings():
+    default = {
+        "logo_width": 30,
+        "watermark_width": 120,
+        "watermark_alpha": 0.15,
+        "signature_width": 24,
+        "signature_box_width": 50,
+        "signature_offset_x": 0,
+        "signature_offset_y": 18
+    }
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                default.update(data or {})
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Warning: Failed to load settings.json: {e}")
+    except Exception as e:
+        print(f"Unexpected error loading settings: {e}")
+    return default
+def save_settings(data):
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving settings: {e}")
+        return False
+def resolve_image(candidates):
+    for n in candidates:
+        p = os.path.join(BASE_DIR, n)
+        if os.path.exists(p):
+            return p
+    return None
+def add_image_safe(pdf, path, x, y, w):
+    if not path:
+        return
+    try:
+        pdf.image(path, x, y, w)
+    except Exception:
+        if PILImage:
+            tmp = None
+            try:
+                fd, tmp = tempfile.mkstemp(suffix=".jpg")
+                os.close(fd)
+                img = PILImage.open(path).convert("RGB")
+                img.save(tmp, "JPEG")
+                pdf.image(tmp, x, y, w)
+            finally:
+                if tmp and os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except:
+                        pass
+LOGO_FILE = resolve_image(["logo.png", "Logo.png", "logo.jpg", "logo.jpeg"])
+SIGN_FILE = resolve_image(["DigitalSignature.png", "digital signature.png", "digitalsignature.png", "signature.png", "signature.jpg", "digitalsignature.jpg"])
+def add_watermark_safe(pdf, path, w, alpha=0.15):
+    if not path:
+        return
+    try:
+        if PILImage:
+            tmp = None
+            try:
+                fd, tmp = tempfile.mkstemp(suffix=".jpg")
+                os.close(fd)
+                img = PILImage.open(path).convert("RGB")
+                white = PILImage.new("RGB", img.size, (255, 255, 255))
+                faded = PILImage.blend(white, img, alpha if 0.0 <= alpha <= 1.0 else 0.15)
+                faded.save(tmp, "JPEG")
+                inner_w = pdf.w - pdf.l_margin - pdf.r_margin
+                inner_h = pdf.h - pdf.t_margin - pdf.b_margin
+                x = pdf.l_margin + (inner_w - w) / 2
+                y = pdf.t_margin + (inner_h - w) / 2
+                pdf.image(tmp, x, y, w)
+            finally:
+                if tmp and os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except:
+                        pass
+        else:
+            inner_w = pdf.w - pdf.l_margin - pdf.r_margin
+            inner_h = pdf.h - pdf.t_margin - pdf.b_margin
+            x = pdf.l_margin + (inner_w - w) / 2
+            y = pdf.t_margin + (inner_h - w) / 2
+            pdf.image(path, x, y, w)
+    except Exception as e:
+        print(f"Error adding watermark: {e}")
+
+def generate_invoice_id():
+    dt = datetime.now().strftime("%Y%m%d%H%M%S")
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM invoices")
+        count = cursor.fetchone()[0]
+        conn.close()
+        seq = count + 1
+    except:
+        seq = 1
+    return f"{dt}{seq}"
+
+def calculate_verification_hash(inv_id):
+    """Calculates a unique security hash for an invoice ID."""
+    SECRET_SALT = "SPARK_SECURE_2026"
+    secure_str = f"{inv_id}{SECRET_SALT}"
+    return hashlib.sha256(secure_str.encode()).hexdigest()[:12].upper()
+
+def add_security_elements(pdf, inv_id):
+    """Adds security features to make the invoice harder to forge."""
+    try:
+        # 1. Background Security Text (Multiple faint rows)
+        pdf.set_font("Times", 'B', 35)
+        pdf.set_text_color(248, 248, 248) # Extremely faint gray
+        for i in range(4):
+            pdf.text(15, 80 + i*60, "OFFICIAL INVOICE")
+        
+        # 2. Unique Security Hash at the bottom
+        security_hash = calculate_verification_hash(inv_id)
+        
+        pdf.set_font("Times", 'I', 7)
+        pdf.set_text_color(180, 180, 180)
+        pdf.text(10, pdf.h - 8, f"Verification ID: {inv_id}-{security_hash} | Authenticated by The SPARK Education Centre")
+        
+        # 3. Small "Original" mark
+        pdf.set_font("Times", 'B', 8)
+        pdf.set_text_color(200, 200, 200)
+        pdf.text(pdf.w - 40, 15, "ORIGINAL DOCUMENT")
+    except:
+        pass
+
+class InvoicePDF(FPDF):
+    def header(self):
+        inner_w = self.w - self.l_margin - self.r_margin
+        try:
+            logo_w = self.parent_settings.get("logo_width", 30)
+        except:
+            logo_w = 30
+        x = self.l_margin + (inner_w - logo_w) / 2
+        add_image_safe(self, LOGO_FILE, x, 6, logo_w)
+        if LOGO_FILE and PILImage:
+            try:
+                im = PILImage.open(LOGO_FILE)
+                h = logo_w * (im.size[1] / float(im.size[0]))
+                self.set_y(6 + h + 3)
+            except:
+                self.set_y(6 + logo_w + 3)
+        else:
+            self.set_y(6 + logo_w + 3)
+            
+        self.set_font('Times', 'B', 17)
+        self.set_text_color(26, 115, 232)
+        self.cell(0, 10, 'THE SPARK EDUCATION CENTRE', 0, 1, 'C')
+        self.set_font('Times', 'B', 10)
+        self.cell(0, 5, 'Official Invoice', 0, 1, 'C')
+        self.ln(15)
+
+    def footer(self):
+        self.set_y(-25)
+        self.set_font('Times', 'I', 8)
+        self.set_text_color(100, 100, 100)
+        address = "Address: 88th St, Between 15th and 16th St, Aung Myay Thar San Township, Mandalay."
+        phone = "Phone: 09 - 779 734 500"
+        self.cell(0, 5, address, 0, 1, 'C')
+        self.cell(0, 5, phone, 0, 1, 'C')
+        self.cell(0, 5, f'Page {self.page_no()}', 0, 0, 'R')
+
+class EnterpriseApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("The SPARK Education Centre - Invoice Billing Management System")
+        self.root.geometry("1366x768")
+        try:
+            self.root.minsize(683, 768)
+        except:
+            pass
+        self.root.configure(bg="#f0f2f5")
+        self.dark_mode = False
+        self.settings = load_settings()
+        try:
+            ico = os.path.join(BASE_DIR, "logo.ico")
+            if os.path.exists(ico):
+                self.root.iconbitmap(ico)
+        except:
+            pass
+        try:
+            style = ttk.Style()
+            style.theme_use("clam")
+            style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), foreground="white", background="#1a73e8", padding=8)
+            style.map("Primary.TButton", background=[("active", "#1669c1")])
+            style.configure("Secondary.TButton", font=("Segoe UI", 10), foreground="#1a73e8", background="#e8f0fe", padding=8)
+            style.map("Secondary.TButton", background=[("active", "#d2e3fc")])
+            style.configure("Danger.TButton", font=("Segoe UI", 10, "bold"), foreground="white", background="#d93025", padding=8)
+            style.map("Danger.TButton", background=[("active", "#b31412")])
+            style.configure("Treeview", rowheight=28, font=("Segoe UI", 10))
+            style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
+            style.configure("TCombobox", padding=4, font=("Segoe UI", 10))
+            style.configure("TLabel", font=("Segoe UI", 10))
+        except:
+            pass
+        
+        self.current_items = [] 
+        self.editing_id = None 
+        self.init_db()
+        self.setup_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
+
+    def on_app_close(self):
+        """Handles application closing, including auto-backup."""
+        self.auto_backup_on_exit()
+        self.root.destroy()
+
+    def auto_backup_on_exit(self):
+        """Silently creates a backup of the SQLite database on exit."""
+        if not os.path.exists(DB_FILE):
+            return 
+        try:
+            backup_dir = os.path.join(BASE_DIR, "Backup Folder")
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            unique_id = hashlib.sha1(os.urandom(8)).hexdigest()[:6]
+            backup_name = f"DB_Backup_{timestamp}_{unique_id}.db"
+            dest = os.path.join(backup_dir, backup_name)
+            
+            shutil.copy2(DB_FILE, dest)
+        except Exception as e:
+            print(f"Auto-backup on exit failed: {e}")
+
+    def init_db(self):
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS invoices (
+                    id TEXT PRIMARY KEY,
+                    date TEXT,
+                    name TEXT,
+                    items_details TEXT,
+                    month TEXT,
+                    year TEXT,
+                    total REAL,
+                    advance REAL DEFAULT 0,
+                    advance_item TEXT,
+                    remarks TEXT
+                )
+            """)
+            conn.commit()
+            
+            # Migration: add advance column if it doesn't exist
+            try:
+                cursor.execute("ALTER TABLE invoices ADD COLUMN advance REAL DEFAULT 0")
+                conn.commit()
+            except:
+                pass
+            
+            try:
+                cursor.execute("ALTER TABLE invoices ADD COLUMN advance_item TEXT")
+                conn.commit()
+            except:
+                pass
+            
+            # Migration from CSV if exists and SQLite is empty
+            cursor.execute("SELECT COUNT(*) FROM invoices")
+            if cursor.fetchone()[0] == 0 and os.path.exists(CSV_MIGRATE_FILE):
+                try:
+                    with open(CSV_MIGRATE_FILE, mode='r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            cursor.execute("""
+                                INSERT INTO invoices (id, date, name, items_details, month, year, total, remarks)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (row["ID"], row["Date"], row["Name"], row["Items_Details"], row["Month"], row["Year"], float(row["Total"]), row.get("Remarks", "")))
+                    conn.commit()
+                    # Mark CSV as migrated
+                    os.rename(CSV_MIGRATE_FILE, CSV_MIGRATE_FILE + ".migrated")
+                except Exception as ex:
+                    print(f"Migration error: {ex}")
+            
+            conn.close()
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to initialize database: {e}")
+
+    def setup_ui(self):
+        # Header with Gradient-like Indication
+        header = tk.Frame(self.root, bg="#1a237e", height=90) # Darker indigo for premium look
+        header.pack(side="top", fill="x")
+        header.pack_propagate(False)
+        
+        # Logo & Title in Header
+        title_f = tk.Frame(header, bg="#1a237e")
+        title_f.place(relx=0.5, rely=0.5, anchor="center")
+        
+        tk.Label(title_f, text="THE SPARK EDUCATION CENTRE", fg="white", bg="#1a237e", font=("Segoe UI", 24, "bold")).pack()
+        tk.Label(title_f, text="Invoice BillingManagement System", fg="#c5cae9", bg="#1a237e", font=("Segoe UI", 9, "bold")).pack()
+        
+        # Database Backup & Restore in Header (Right side)
+        db_hdr_btns = tk.Frame(header, bg="#1a237e")
+        db_hdr_btns.place(relx=1.0, rely=0.5, anchor="e", x=-30)
+        
+        # Custom style for header buttons
+        style = ttk.Style()
+        style.configure("Header.TButton", font=("Segoe UI", 9, "bold"), padding=5)
+        
+        ttk.Button(db_hdr_btns, text="BACKUP DB", style="Header.TButton", command=self.backup_database).pack(side="left", padx=5)
+        ttk.Button(db_hdr_btns, text="RESTORE DB", style="Header.TButton", command=self.restore_database).pack(side="left", padx=5)
+        
+        # Theme toggle & Settings in Header (Left side)
+        sys_btns = tk.Frame(header, bg="#1a237e")
+        sys_btns.place(relx=0.0, rely=0.5, anchor="w", x=30)
+        ttk.Button(sys_btns, text="SETTINGS", style="Header.TButton", command=self.open_settings).pack(side="left", padx=5)
+        ttk.Button(sys_btns, text="THEME", style="Header.TButton", command=self.toggle_theme).pack(side="left", padx=5)
+        
+        self.header = header
+
+        # Main Paned Window for responsiveness
+        self.paned = tk.PanedWindow(self.root, orient="horizontal", bg="#f0f2f5", bd=0, sashwidth=4)
+        self.paned.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # LEFT SIDE (Invoice Creation)
+        left_container = tk.Frame(self.paned, bg="#f0f2f5")
+        self.paned.add(left_container, width=480) # Fixed initial width
+
+        left_f = tk.LabelFrame(left_container, text=" 1. Create Invoice ", font=("Segoe UI", 10, "bold"), padx=15, pady=10, bg="white", relief="flat")
+        left_f.pack(fill="both", expand=True, padx=5, pady=5)
+        self.left_f = left_f
+
+        # Re-introducing Scrollable Canvas for Left Side
+        left_scroll_frame = tk.Frame(left_f, bg="white")
+        left_scroll_frame.pack(fill="both", expand=True)
+        
+        form_scroll_canvas = tk.Canvas(left_scroll_frame, bg="white", highlightthickness=0)
+        form_scroll_canvas.pack(side="left", fill="both", expand=True)
+        
+        left_vsb = ttk.Scrollbar(left_scroll_frame, orient="vertical", command=form_scroll_canvas.yview)
+        left_vsb.pack(side="right", fill="y")
+        form_scroll_canvas.configure(yscrollcommand=left_vsb.set)
+        
+        form_f = tk.Frame(form_scroll_canvas, bg="white")
+        canvas_window = form_scroll_canvas.create_window((0,0), window=form_f, anchor="nw")
+
+        def on_canvas_configure(e):
+            form_scroll_canvas.itemconfig(canvas_window, width=e.width)
+
+        def update_scroll_region(e):
+            form_scroll_canvas.configure(scrollregion=form_scroll_canvas.bbox("all"))
+            
+        form_scroll_canvas.bind("<Configure>", on_canvas_configure)
+        form_f.bind("<Configure>", update_scroll_region)
+        
+        # Mousewheel support
+        def on_mousewheel(event):
+            form_scroll_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        form_scroll_canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+        tk.Label(form_f, text="Student Name", bg="white", font=("Segoe UI", 9)).pack(anchor="w")
+        self.ent_name = tk.Entry(form_f, font=("Segoe UI", 11), bd=1, bg="#f8f9fa", highlightbackground="#e0e0e0", highlightthickness=1)
+        self.ent_name.pack(fill="x", pady=(2, 10))
+
+        tk.Label(form_f, text="Billing Period", bg="white", font=("Segoe UI", 9)).pack(anchor="w")
+        df = tk.Frame(form_f, bg="white")
+        df.pack(fill="x", pady=(2, 10))
+        self.ent_month = ttk.Combobox(df, values=["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"], state="readonly", font=("Segoe UI", 9))
+        self.ent_month.set(datetime.now().strftime("%B")); self.ent_month.pack(side="left", expand=True, fill="x", padx=(0,5))
+        self.ent_year = ttk.Combobox(df, values=[str(y) for y in range(2026, 2046)], state="readonly", font=("Segoe UI", 9))
+        self.ent_year.set(datetime.now().year); self.ent_year.pack(side="left", expand=True, fill="x")
+        
+        self.ent_name.bind("<KeyRelease>", self.update_finalize_state)
+
+        tk.Label(form_f, text="Item Details", bg="white", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        item_box = tk.Frame(form_f, bg="#f8f9fa", padx=8, pady=8, bd=1, relief="solid", highlightbackground="#e0e0e0")
+        item_box.pack(fill="x", pady=(2, 10))
+
+        # Compact Item Grid
+        tk.Label(item_box, text="Category", bg="#f8f9fa", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w")
+        self.ent_item_desc = ttk.Combobox(item_box, values=[" ", "Course Fee","Tutoring Class Fee","Exam Book Fee","Exam Practice Book Fee","Textbook Fee", "Exam Registration Fee"], width=20, font=("Segoe UI", 9))
+        self.ent_item_desc.set("Course Fee"); self.ent_item_desc.grid(row=1, column=0, padx=(0,5), pady=(1,5), sticky="ew")
+        
+        tk.Label(item_box, text="Level/Class", bg="#f8f9fa", font=("Segoe UI", 8)).grid(row=0, column=1, sticky="w")
+        self.ent_sub_item = ttk.Combobox(item_box, values=[" ", "Phonics", "STARTERS", "MOVERS", "FLYERS", "KET", "PET", "B1", "B2", "Maths", "Physics", "YEAR 1", "YEAR 2", "YEAR 3", "YEAR 4", "YEAR 5", "YEAR 6", "YEAR 7", "YEAR 8", "YEAR 9", "YEAR 10"], width=15, font=("Segoe UI", 9))
+        self.ent_sub_item.grid(row=1, column=1, pady=(1,5), sticky="ew")
+
+        tk.Label(item_box, text="Student Details (Optional)", bg="#f8f9fa", font=("Segoe UI", 8)).grid(row=2, column=0, sticky="w")
+        self.ent_item_student = tk.Entry(item_box, font=("Segoe UI", 9), bd=1)
+        self.ent_item_student.grid(row=3, column=0, columnspan=2, pady=(1,5), sticky="ew")
+
+        tk.Label(item_box, text="Amount (MMK)", bg="#f8f9fa", font=("Segoe UI", 8)).grid(row=4, column=0, sticky="w")
+        self.ent_item_amt = tk.Entry(item_box, font=("Segoe UI", 11, "bold"), bd=1, justify="right")
+        self.ent_item_amt.grid(row=5, column=0, padx=(0,5), pady=(1,5), sticky="ew")
+        self.ent_item_amt.insert(0, "0")
+        self.ent_item_amt.bind("<KeyRelease>", self.on_amount_key)
+        self.ent_item_amt.bind("<Return>", self.on_amount_enter)
+
+        tk.Label(item_box, text="Advance (MMK)", bg="#f8f9fa", font=("Segoe UI", 8)).grid(row=4, column=1, sticky="w")
+        self.ent_item_advance = tk.Entry(item_box, font=("Segoe UI", 11, "bold"), bd=1, justify="right", bg="#fff3e0")
+        self.ent_item_advance.grid(row=5, column=1, pady=(1,5), sticky="ew")
+        self.ent_item_advance.insert(0, "0")
+        self.ent_item_advance.bind("<KeyRelease>", self.on_item_advance_key)
+
+        self.btn_add_update = tk.Button(item_box, text="+ ADD TO LIST", font=("Segoe UI", 9, "bold"), bg="#1a73e8", fg="white", bd=0, cursor="hand2", command=self.add_item_to_list, pady=5)
+        self.btn_add_update.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(2,0))
+
+        # Items Table (Reduced height)
+        tk.Label(form_f, text="Current Invoice Items", bg="white", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(5,2))
+        tree_f = tk.Frame(form_f, bg="white")
+        tree_f.pack(fill="both", expand=True)
+        
+        self.item_tree = ttk.Treeview(tree_f, columns=("Desc", "Sub", "Price", "Adv"), show="headings", height=4, style="Treeview")
+        self.item_tree.heading("Desc", text="Category"); self.item_tree.heading("Sub", text="Level"); self.item_tree.heading("Price", text="Price"); self.item_tree.heading("Adv", text="Advance")
+        self.item_tree.column("Desc", width=120); self.item_tree.column("Sub", width=70); self.item_tree.column("Price", width=80, anchor="e"); self.item_tree.column("Adv", width=80, anchor="e")
+        self.item_tree.pack(side="left", fill="both", expand=True)
+        
+        isb = ttk.Scrollbar(tree_f, orient="vertical", command=self.item_tree.yview)
+        isb.pack(side="right", fill="y")
+        self.item_tree.configure(yscrollcommand=isb.set)
+
+        btn_f = tk.Frame(form_f, bg="white")
+        btn_f.pack(fill="x", pady=5)
+        ttk.Button(btn_f, text="EDIT ITEM", style="Secondary.TButton", command=self.edit_selected_item).pack(side="left", expand=True, fill="x", padx=(0,2))
+        ttk.Button(btn_f, text="DELETE ITEM", style="Danger.TButton", command=self.delete_selected_item).pack(side="left", expand=True, fill="x", padx=(2,0))
+        
+        self.lbl_total = tk.Label(form_f, text="TOTAL: 0 MMK", font=("Segoe UI", 16, "bold"), fg="#1b5e20", bg="white")
+        self.lbl_total.pack(anchor="e", pady=(5,0))
+
+        self.btn_finalize_left = tk.Button(form_f, text="FINALIZE & PRINT INVOICE", font=("Segoe UI", 11, "bold"), bg="#1b5e20", fg="white", bd=0, cursor="hand2", command=self.finalize_payment, pady=10)
+        self.btn_finalize_left.pack(fill="x", pady=(10, 5))
+        
+        ttk.Button(form_f, text="CLEAR ALL", style="Secondary.TButton", command=self.clear_all).pack(fill="x")
+
+        # RIGHT SIDE (Records History)
+        right_container = tk.Frame(self.paned, bg="#f0f2f5")
+        self.paned.add(right_container, width=800) # Initial width
+
+        right_f = tk.LabelFrame(right_container, text=" 2. Records History ", font=("Segoe UI", 11, "bold"), padx=20, pady=15, bg="white", relief="flat")
+        right_f.pack(fill="both", expand=True, padx=5, pady=5)
+        self.right_f = right_f
+
+        # Toolbar for right side
+        dash_f = tk.Frame(right_f, bg="white")
+        dash_f.pack(fill="x", pady=(0,15))
+        
+        search_sub_f = tk.Frame(dash_f, bg="white")
+        search_sub_f.pack(side="left", fill="x", expand=True)
+        
+        tk.Label(search_sub_f, text="Search Records", bg="white", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self.ent_search = tk.Entry(search_sub_f, font=("Segoe UI", 11), bd=1, bg="#f8f9fa", highlightbackground="#e0e0e0", highlightthickness=1)
+        self.ent_search.pack(fill="x", pady=5, padx=(0, 20))
+        self.ent_search.bind("<KeyRelease>", self.filter_data)
+
+        actions_f = tk.Frame(dash_f, bg="white")
+        actions_f.pack(side="right")
+        
+        months = ["All","January","February","March","April","May","June","July","August","September","October","November","December"]
+        self.rep_month = ttk.Combobox(actions_f, values=months, state="readonly", width=12)
+        self.rep_month.set("All")
+        self.rep_month.pack(side="top", pady=(0, 5), fill="x")
+        
+        btn_grid = tk.Frame(actions_f, bg="white")
+        btn_grid.pack()
+        
+        ttk.Button(btn_grid, text="REPORT", width=10, command=self.generate_monthly_report_pdf).grid(row=0, column=0, padx=2, pady=2)
+        ttk.Button(btn_grid, text="EXPORT", width=10, command=self.export_monthly_csv).grid(row=0, column=1, padx=2, pady=2)
+        ttk.Button(btn_grid, text="REPRINT", width=10, command=self.reprint_selected).grid(row=1, column=0, padx=2, pady=2)
+        ttk.Button(btn_grid, text="VERIFY", width=10, command=self.verify_invoice_ui).grid(row=1, column=1, padx=2, pady=2)
+        ttk.Button(btn_grid, text="DELETE", style="Danger.TButton", width=22, command=self.delete_payment).grid(row=2, column=0, columnspan=2, pady=2)
+
+        # Records Table with Scrollbars
+        table_container = tk.Frame(right_f, bg="white")
+        table_container.pack(fill="both", expand=True)
+        
+        self.db_tree = ttk.Treeview(table_container, columns=("ID", "Name", "Date", "Month", "Total"), show="headings", style="Treeview")
+        for col in self.db_tree["columns"]: 
+            self.db_tree.heading(col, text=col.upper())
+            self.db_tree.column(col, width=100, anchor="center")
+        
+        self.db_tree.column("Name", width=200, anchor="w")
+        self.db_tree.column("Total", width=120, anchor="e")
+        
+        vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.db_tree.yview)
+        hsb = ttk.Scrollbar(table_container, orient="horizontal", command=self.db_tree.xview)
+        self.db_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        self.db_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        
+        table_container.grid_rowconfigure(0, weight=1)
+        table_container.grid_columnconfigure(0, weight=1)
+
+        self.db_tree.bind("<Double-1>", self.prepare_edit)
+        self.load_db_data()
+
+        # Bottom Status Bar
+        bottom_bar = tk.Frame(self.root, bg="#1a237e", height=35)
+        bottom_bar.pack(side="bottom", fill="x")
+        bottom_bar.pack_propagate(False)
+        self.bottom_bar = bottom_bar
+        
+        self.status_label = tk.Label(bottom_bar, text="SYSTEM READY - THE SPARK EDUCATION CENTRE", bg="#1a237e", fg="#e8eaf6", font=("Segoe UI", 9, "bold"))
+        self.status_label.pack(side="left", padx=20)
+        
+        self.root.after(800, self.update_status)
+        self.status_f = bottom_bar
+    def ensure_layout(self, event=None):
+        try:
+            self.header.configure(height=80)
+            self.header.pack_propagate(False)
+            self.bottom_bar.lift()
+        except:
+            pass
+
+    def add_item_to_list(self):
+        cat, sub, amt, adv = self.ent_item_desc.get(), self.ent_sub_item.get(), self.ent_item_amt.get(), self.ent_item_advance.get()
+        try:
+            val = float(str(amt).replace(",", ""))
+            adv_val = float(str(adv).replace(",", "")) if adv.strip() else 0.0
+            display_full = f"{cat} ({sub})" if sub.strip() else cat
+            stu = self.ent_item_student.get().strip()
+            cat_display = cat if not stu else f"{cat} - {stu}"
+            if self.editing_id:
+                children = list(self.item_tree.get_children())
+                if self.editing_id in children:
+                    idx = children.index(self.editing_id)
+                    self.current_items[idx] = {"cat": cat, "sub": sub, "student": stu, "desc": display_full, "amt": val, "adv": adv_val}
+                    self.item_tree.item(self.editing_id, values=(cat_display, sub, f"{val:,.0f}", f"{adv_val:,.0f}"))
+                self.editing_id = None
+                self.btn_add_update.config(text="+ ADD TO LIST")
+            else:
+                self.current_items.append({"cat": cat, "sub": sub, "student": stu, "desc": display_full, "amt": val, "adv": adv_val})
+                count = len(self.item_tree.get_children())
+                tag = "odd" if count % 2 == 0 else "even"
+                self.item_tree.tag_configure("odd", background="#fafafa")
+                self.item_tree.tag_configure("even", background="#ffffff")
+                self.item_tree.insert("", "end", values=(cat_display, sub, f"{val:,.0f}", f"{adv_val:,.0f}"), tags=(tag,))
+            self.update_total_display()
+            self.ent_item_amt.delete(0, tk.END); self.ent_item_amt.insert(0, "0")
+            self.ent_item_advance.delete(0, tk.END); self.ent_item_advance.insert(0, "0")
+            self.ent_item_student.delete(0, tk.END)
+        except: messagebox.showerror("Error", "Check Amount")
+        try:
+            self.update_finalize_state()
+        except:
+            pass
+
+    def on_item_advance_key(self, e=None):
+        try:
+            cur = self.ent_item_advance.get()
+            fmt = self.format_amount_text(cur)
+            self.ent_item_advance.delete(0, tk.END)
+            self.ent_item_advance.insert(0, fmt)
+            try:
+                self.ent_item_advance.icursor(tk.END)
+            except:
+                pass
+        except:
+            pass
+
+    def update_total_display(self):
+        try:
+            subtotal = sum(i['amt'] for i in self.current_items)
+            total_adv = sum(i.get('adv', 0.0) for i in self.current_items)
+            total = subtotal - total_adv
+            self.lbl_total.config(text=f"Total: {total:,.0f} MMK")
+        except:
+            pass
+
+    def format_amount_text(self, txt):
+        try:
+            raw = str(txt).replace(",", "").strip()
+            if raw == "": return ""
+            if "." in raw:
+                int_part, dec_part = raw.split(".", 1)
+                int_fmt = f"{int(int_part):,}"
+                return f"{int_fmt}.{dec_part}"
+            else:
+                return f"{int(raw):,}"
+        except:
+            return txt
+
+    def on_amount_key(self, e=None):
+        try:
+            cur = self.ent_item_amt.get()
+            fmt = self.format_amount_text(cur)
+            self.ent_item_amt.delete(0, tk.END)
+            self.ent_item_amt.insert(0, fmt)
+            try:
+                self.ent_item_amt.icursor(tk.END)
+            except:
+                pass
+        except:
+            pass
+    
+    def on_amount_enter(self, e=None):
+        try:
+            self.add_item_to_list()
+        except:
+            pass
+
+    def edit_selected_item(self):
+        sel = self.item_tree.selection()
+        if not sel: return
+        iid = sel[0]
+        children = list(self.item_tree.get_children())
+        if iid not in children: return
+        idx = children.index(iid)
+        item = self.current_items[idx]
+        self.ent_item_desc.set(item["cat"])
+        self.ent_sub_item.set(item["sub"])
+        try:
+            self.ent_item_student.delete(0, tk.END)
+            self.ent_item_student.insert(0, item.get("student",""))
+        except:
+            pass
+        self.ent_item_amt.delete(0, tk.END)
+        self.ent_item_amt.insert(0, str(item["amt"]))
+        self.ent_item_advance.delete(0, tk.END)
+        self.ent_item_advance.insert(0, str(item.get("adv", 0.0)))
+        self.editing_id = iid
+        self.btn_add_update.config(text="UPDATE ITEM")
+
+    def delete_selected_item(self):
+        sel = self.item_tree.selection()
+        if not sel: return
+        iid = sel[0]
+        children = list(self.item_tree.get_children())
+        if iid not in children: return
+        idx = children.index(iid)
+        self.item_tree.delete(iid)
+        del self.current_items[idx]
+        self.update_total_display()
+        if self.editing_id == iid:
+            self.editing_id = None
+            self.btn_add_update.config(text="+ ADD TO LIST")
+        try:
+            # keep finalize button state consistent
+            self.update_finalize_state()
+        except:
+            pass
+
+    def finalize_payment(self):
+        name, month, year = self.ent_name.get().strip(), self.ent_month.get(), self.ent_year.get()
+        if not name or not self.current_items: return
+        
+        subtotal = sum(i["amt"] for i in self.current_items)
+        advance = sum(i.get("adv", 0.0) for i in self.current_items)
+        total = subtotal - advance
+        
+        # Format: desc:amt:adv
+        items_str = " | ".join([f"{i['desc']}:{i['amt']}:{i.get('adv', 0.0)}" for i in self.current_items])
+        
+        inv_id = generate_invoice_id()
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO invoices (id, date, name, items_details, month, year, total, advance, remarks)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (inv_id, datetime.now().strftime("%Y-%m-%d"), name, items_str, month, year, total, advance, ""))
+            conn.commit()
+            conn.close()
+            
+            self.export_invoice_pdf(inv_id, name, month, year, subtotal, advance)
+            messagebox.showinfo("Success", f"Invoice #{inv_id} created!")
+            self.clear_all()
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to save invoice: {e}")
+
+    def export_invoice_pdf(self, inv_id, name, month, year, subtotal, total_advance):
+        total = subtotal - total_advance
+        try:
+            pdf = InvoicePDF()
+            try:
+                pdf.parent_settings = self.settings
+            except:
+                pass
+            pdf.set_margins(8, 10, 8)
+            pdf.set_auto_page_break(True, margin=10)
+            pdf.add_page()
+            
+            # Add Watermark behind content
+            add_watermark_safe(pdf, LOGO_FILE, self.settings.get("watermark_width", 120), self.settings.get("watermark_alpha", 0.15))
+            add_security_elements(pdf, inv_id)
+            
+            # Invoice Basic Info
+            pdf.set_text_color(0, 0, 0) # Set text to black
+            pdf.set_font("Times", 'B', 11)
+            pdf.cell(0, 6, f"INVOICE NO: #{inv_id}", ln=True)
+            pdf.set_font("Times", '', 11)
+            pdf.cell(0, 5, f"Date : {datetime.now().strftime('%d-%m-%Y')}", ln=True)
+            students_list = [i.get("student") for i in self.current_items if isinstance(i, dict) and i.get("student")]
+            students_text = ", ".join(sorted(set(students_list))) if students_list else ""
+            pdf.cell(0, 5, f"Invoice To : {name}", ln=True)
+            if students_text:
+                pdf.cell(0, 5, f"Students : {students_text}", ln=True)
+            pdf.cell(0, 5, f"Billing Month : {month} {year}", ln=True)
+            pdf.ln(5)
+            
+            # Table Header
+            pdf.set_fill_color(26, 115, 232); pdf.set_text_color(255); pdf.set_font("Times", 'B', 11)
+            pdf.cell(140, 8, " Description", 1, 0, 'L', True)
+            pdf.cell(40, 8, "Amount (MMK)", 1, 1, 'C', True)
+            
+            # Table Items (grouped per student/category/level)
+            pdf.set_text_color(0); pdf.set_font("Times", '', 11)
+            grouped = {}
+            for it in self.current_items:
+                stu = (it.get("student") or "").strip()
+                key = (stu, it.get("cat",""), it.get("sub",""))
+                if key not in grouped:
+                    grouped[key] = {"amt": 0.0, "adv": 0.0}
+                grouped[key]["amt"] += float(it.get("amt", 0.0))
+                grouped[key]["adv"] += float(it.get("adv", 0.0))
+            
+            for (stu, cat, sub), vals in sorted(grouped.items(), key=lambda k: (k[0][0] or "", k[0][1], k[0][2])):
+                desc = f"{cat} ({sub})" if sub else cat
+                if stu:
+                    desc = f"{stu} - {desc}"
+                
+                amt_val = vals["amt"]
+                adv_val = vals["adv"]
+                
+                pdf.cell(140, 7, f" {desc}", 1)
+                pdf.cell(40, 7, f"{amt_val:,.0f}", 1, 1, 'R')
+                
+                if adv_val > 0:
+                    pdf.set_font("Times", 'I', 9)
+                    pdf.set_text_color(100, 100, 100)
+                    pdf.cell(140, 6, f"   - Advance Payment Applied", 1)
+                    pdf.cell(40, 6, f"- {adv_val:,.0f}", 1, 1, 'R')
+                    pdf.set_font("Times", '', 11)
+                    pdf.set_text_color(0)
+            
+            student_totals = {}
+            for (stu, cat, sub), vals in grouped.items():
+                if stu not in student_totals:
+                    student_totals[stu] = {"amt": 0.0, "adv": 0.0}
+                student_totals[stu]["amt"] += vals["amt"]
+                student_totals[stu]["adv"] += vals["adv"]
+            
+            # Subtotals per student (if multiple students)
+            if len(student_totals) > 1:
+                pdf.set_font("Times", 'B', 11)
+                pdf.set_fill_color(245, 248, 255)
+                for stu in sorted(student_totals.keys(), key=lambda s: s or ""):
+                    label = f" Subtotal - {stu}" if stu else " Subtotal (Misc Items)"
+                    stu_net = student_totals[stu]["amt"] - student_totals[stu]["adv"]
+                    pdf.cell(140, 7, label, 1, 0, 'L', True)
+                    pdf.cell(40, 7, f"{stu_net:,.0f}", 1, 1, 'R', True)
+                pdf.set_font("Times", '', 11)
+            
+            # Final Totals Section
+            pdf.ln(2)
+            pdf.set_font("Times", 'B', 11)
+            pdf.set_fill_color(240, 240, 240)
+            pdf.cell(140, 7, " TOTAL GROSS AMOUNT", 1, 0, 'L', True)
+            pdf.cell(40, 7, f"{subtotal:,.0f}", 1, 1, 'R', True)
+            
+            if total_advance > 0:
+                pdf.set_font("Times", 'B', 11)
+                pdf.set_fill_color(255, 243, 224)
+                pdf.cell(140, 7, " TOTAL ADVANCE PAYMENTS", 1, 0, 'L', True)
+                pdf.cell(40, 7, f"- {total_advance:,.0f}", 1, 1, 'R', True)
+
+            # Net Payable
+            pdf.set_font("Times", 'B', 12)
+            pdf.set_fill_color(230, 240, 255)
+            pdf.cell(140, 8, " TOTAL NET PAYABLE", 1, 0, 'L', True)
+            pdf.cell(40, 8, f"{total:,.0f}", 1, 1, 'R', True)
+            
+            # --- Payment Info Section ---
+            pdf.ln(5)
+            pdf.set_font("Times", 'B', 10)
+            pdf.set_text_color(26, 115, 232)
+            pdf.cell(0, 6, "Payment Method: Cash / KBZPay", ln=True)
+            pdf.set_font("Times", '', 9)
+            pdf.set_text_color(80, 80, 80)
+            pdf.cell(0, 5, "KBZPay Name : Daw Su Lae Thwin", ln=True)
+            pdf.cell(0, 5, "KBZPay Ph No : 09-779734500", ln=True)
+
+            # --- Signature Section ---
+            pdf.ln(3)
+            # Digital Signature Box
+            curr_x = pdf.get_x() + 130
+            curr_y = pdf.get_y()
+            box_w = self.settings.get("signature_box_width", 50)
+            sig_w = self.settings.get("signature_width", 24)
+            off_x = self.settings.get("signature_offset_x", 0)
+            off_y = self.settings.get("signature_offset_y", 18)
+            needed_h = 54
+            remaining = (pdf.h - pdf.b_margin) - curr_y
+            if remaining < needed_h:
+                pdf.add_page()
+                curr_x = pdf.get_x() + 130
+                curr_y = pdf.get_y()
+            sig_x = curr_x + (box_w - sig_w) / 2 + off_x
+            sig_y = curr_y + off_y
+            add_image_safe(pdf, SIGN_FILE, sig_x, sig_y, sig_w)
+            pdf.set_font("Times", 'I', 8)
+            pdf.set_text_color(150, 150, 150)
+            pdf.text(curr_x + 5, curr_y + 40, "")
+            
+            # Line & Names
+            pdf.set_draw_color(200, 200, 200)
+            pdf.line(curr_x, curr_y + 42, curr_x + 50, curr_y + 42)
+            
+            pdf.set_y(curr_y + 48)
+            pdf.set_text_color(0)
+            pdf.set_font("Times", 'B', 9)
+            pdf.cell(130)
+            pdf.cell(50, 6, "Authorized Person,", ln=True, align='C')
+            
+            pdf.set_font("Times", 'BU', 9)
+            pdf.cell(130)
+            pdf.cell(50, 6, "Su Lae Thwin", ln=True, align='C')
+
+            # --- File Saving ---
+            # Sanitize student name for filename
+            sane_name = "".join(c for c in name if c.isalnum() or c in (" ", "_")).rstrip()
+            
+            # Create structured directory path
+            os.makedirs(os.path.join(BASE_DIR, "PDF INVOICE"), exist_ok=True)
+            os.makedirs(os.path.join(BASE_DIR, "PNG INVOICE"), exist_ok=True)
+            pdf_dir = os.path.join(BASE_DIR, "PDF INVOICE", year, month)
+            png_dir = os.path.join(BASE_DIR, "PNG INVOICE", year, month)
+            os.makedirs(pdf_dir, exist_ok=True)
+            os.makedirs(png_dir, exist_ok=True)
+            
+            # Define filenames
+            base_filename = f"{sane_name} - {inv_id}"
+            pdf_path = os.path.join(pdf_dir, f"{base_filename}.pdf")
+            png_path = os.path.join(png_dir, f"{base_filename}.png")
+            
+            # Save PDF
+            pdf.output(pdf_path)
+            
+            # Save PNG (Convert PDF to PNG using fitz)
+            lib_fitz = get_fitz()
+            if lib_fitz:
+                try:
+                    doc = lib_fitz.open(pdf_path)
+                    for i, page in enumerate(doc):
+                        pix = page.get_pixmap(matrix=lib_fitz.Matrix(2, 2)) # 2x zoom for better quality
+                        pix.save(png_path if i == 0 else f"{png_path[:-4]}_page_{i+1}.png")
+                    doc.close()
+                except Exception as png_e:
+                    messagebox.showerror("PNG Conversion Error", f"Failed to save PNG: {png_e}")
+            else:
+                messagebox.showwarning("Library Missing", "PNG conversion library (PyMuPDF) is missing. Please restart the app or install it.")
+            
+            try:
+                self.open_file(pdf_path)
+            except:
+                pass
+        except Exception as e:
+            messagebox.showerror("PDF Error", f"Error: {e}")
+
+    def generate_monthly_report_pdf(self):
+        year = str(self.ent_year.get())
+        month_filter = self.rep_month.get()
+        if not os.path.exists(DB_FILE):
+            messagebox.showerror("Report Error", "No database found")
+            return
+        
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            
+            if month_filter == "All":
+                cursor.execute("SELECT month, name, total FROM invoices WHERE year = ?", (year,))
+            else:
+                cursor.execute("SELECT month, name, total FROM invoices WHERE year = ? AND month = ?", (year, month_filter))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            months_order = ["January","February","March","April","May","June","July","August","September","October","November","December"]
+            stats = {m: {"students": set(), "total": 0.0} for m in months_order}
+            
+            for m, name, total in rows:
+                if m in stats:
+                    stats[m]["students"].add(name)
+                    stats[m]["total"] += total
+                    
+            pdf = InvoicePDF()
+            pdf.add_page()
+            title = f"Monthly Report - Year {year}" if month_filter == "All" else f"Monthly Report - {month_filter} {year}"
+            pdf.set_font("Times", 'B', 14)
+            pdf.cell(0, 10, title, ln=True, align='C')
+            pdf.ln(5)
+            pdf.set_font("Times", 'B', 10)
+            pdf.set_fill_color(26, 115, 232); pdf.set_text_color(255)
+            pdf.cell(90, 10, " Month", 1, 0, 'L', True)
+            pdf.cell(40, 10, "Students", 1, 0, 'C', True)
+            pdf.cell(60, 10, "Total (MMK)", 1, 1, 'C', True)
+            pdf.set_text_color(0); pdf.set_font("Times", '', 10)
+            
+            grand_students = 0
+            grand_total = 0.0
+            for m in months_order:
+                if month_filter == "All" or m == month_filter:
+                    s_count = len(stats[m]["students"])
+                    t_sum = stats[m]["total"]
+                    grand_students += s_count
+                    grand_total += t_sum
+                    pdf.cell(90, 9, f" {m}", 1)
+                    pdf.cell(40, 9, f"{s_count}", 1, 0, 'C')
+                    pdf.cell(60, 9, f"{t_sum:,.0f}", 1, 1, 'R')
+            
+            pdf.set_font("Times", 'B', 11)
+            pdf.cell(90, 10, " TOTAL", 1)
+            pdf.cell(40, 10, f"{grand_students}", 1, 0, 'C')
+            pdf.cell(60, 10, f"{grand_total:,.0f}", 1, 1, 'R')
+            
+            out = f"Report_{year}.pdf" if month_filter == "All" else f"Report_{year}_{month_filter}.pdf"
+            pdf.output(out)
+            messagebox.showinfo("Success", f"Report generated: {out}")
+            self.open_file(out)
+        except Exception as e:
+            messagebox.showerror("Report Error", f"Error: {e}")
+
+    def load_db_data(self):
+        self.db_tree.delete(*self.db_tree.get_children())
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, name, date, month, total FROM invoices ORDER BY date DESC LIMIT 500")
+            rows = cursor.fetchall()
+            conn.close()
+            
+            for i, r in enumerate(rows):
+                tag = "odd" if i % 2 == 0 else "even"
+                self.db_tree.tag_configure("odd", background="#fafafa")
+                self.db_tree.tag_configure("even", background="#ffffff")
+                self.db_tree.insert("", "end", values=(r[0], r[1], r[2], r[3], f"{r[4]:,.0f}"), tags=(tag,))
+        except Exception as e:
+            print(f"Error loading DB: {e}")
+
+    def filter_data(self, e=None):
+        q = self.ent_search.get().lower()
+        self.db_tree.delete(*self.db_tree.get_children())
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, name, date, month, total FROM invoices WHERE LOWER(name) LIKE ? OR LOWER(id) LIKE ? ORDER BY date DESC", (f'%{q}%', f'%{q}%'))
+            rows = cursor.fetchall()
+            conn.close()
+            
+            for i, r in enumerate(rows):
+                tag = "odd" if i % 2 == 0 else "even"
+                self.db_tree.tag_configure("odd", background="#fafafa")
+                self.db_tree.tag_configure("even", background="#ffffff")
+                self.db_tree.insert("", "end", values=(r[0], r[1], r[2], r[3], f"{r[4]:,.0f}"), tags=(tag,))
+        except Exception as e:
+            print(f"Error filtering DB: {e}")
+
+    def prepare_edit(self, e):
+        # Implementation if needed, currently just a placeholder in original code
+        pass
+
+    def clear_all(self, editing=False):
+        if not editing: self.editing_id = None
+        self.current_items = []
+        self.item_tree.delete(*self.item_tree.get_children())
+        self.ent_name.delete(0, tk.END)
+        self.ent_item_amt.delete(0, tk.END); self.ent_item_amt.insert(0, "0")
+        self.ent_item_advance.delete(0, tk.END); self.ent_item_advance.insert(0, "0")
+        self.lbl_total.config(text="Total: 0 MMK")
+        self.btn_add_update.config(text="+ ADD TO LIST")
+        self.load_db_data()
+        self.root.after(200, self.update_status)
+        try:
+            self.update_finalize_state()
+        except:
+            pass
+
+    def reprint_selected(self):
+        sel = self.db_tree.selection()
+        if not sel: return
+        vals = self.db_tree.item(sel[0], "values")
+        inv_id = vals[0]
+        
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM invoices WHERE id = ?", (inv_id,))
+            rec = cursor.fetchone()
+            conn.close()
+            
+            if not rec: return
+            
+            # id, date, name, items_details, month, year, total, advance, remarks
+            items = []
+            raw = rec[3]
+            for seg in raw.split(" | "):
+                parts = seg.split(":")
+                if len(parts) >= 3:
+                    items.append({"desc": parts[0], "amt": float(parts[1]), "adv": float(parts[2])})
+                elif len(parts) == 2:
+                    items.append({"desc": parts[0], "amt": float(parts[1]), "adv": 0.0})
+            
+            # Use total and advance from DB
+            total_db = float(rec[6])
+            try:
+                advance_db = float(rec[7]) if rec[7] is not None else 0.0
+            except:
+                advance_db = 0.0
+            
+            subtotal_db = total_db + advance_db
+            
+            old_items = self.current_items
+            self.current_items = items
+            try:
+                self.export_invoice_pdf(rec[0], rec[2], rec[4], rec[5], subtotal_db, advance_db)
+                messagebox.showinfo("Success", f"Re-printed Invoice #{rec[0]}")
+            finally:
+                self.current_items = old_items
+        except Exception as e:
+            messagebox.showerror("Reprint Error", f"Error: {e}")
+
+    def delete_payment(self):
+        sel = self.db_tree.selection()
+        if not sel: return
+        vals = self.db_tree.item(sel[0], "values")
+        inv_id = vals[0]
+        
+        if not messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete invoice #{inv_id}?"):
+            return
+            
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM invoices WHERE id = ?", (inv_id,))
+            conn.commit()
+            conn.close()
+            
+            self.load_db_data()
+            messagebox.showinfo("Success", f"Deleted invoice #{inv_id}")
+        except Exception as e:
+            messagebox.showerror("Delete Error", f"Error: {e}")
+
+    def verify_invoice_ui(self):
+        """UI for verifying an invoice's authenticity."""
+        win = tk.Toplevel(self.root)
+        win.title("Verify Invoice Authenticity")
+        win.geometry("450x250")
+        win.resizable(False, False)
+        
+        frm = tk.Frame(win, padx=20, pady=20)
+        frm.pack(fill="both", expand=True)
+        
+        tk.Label(frm, text="Enter the Verification ID from the printed invoice:", font=("Arial", 10, "bold")).pack(pady=(0,10))
+        tk.Label(frm, text="Format: 20260317XXXXXX-XXXXXXXXXXXX", fg="gray", font=("Arial", 8)).pack()
+        
+        ent_id = tk.Entry(frm, font=("Consolas", 12), justify="center", bd=2, relief="groove")
+        ent_id.pack(fill="x", pady=15)
+        ent_id.focus_set()
+        
+        def do_verify():
+            raw = ent_id.get().strip()
+            if "-" not in raw:
+                messagebox.showwarning("Invalid Format", "Please enter the full Verification ID (including the dash).")
+                return
+            
+            try:
+                inv_id, provided_hash = raw.split("-", 1)
+                expected_hash = calculate_verification_hash(inv_id)
+                
+                if provided_hash.upper() == expected_hash:
+                    conn = sqlite3.connect(DB_FILE)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM invoices WHERE id = ?", (inv_id,))
+                    exists = cursor.fetchone()[0] > 0
+                    conn.close()
+                    
+                    if exists:
+                        messagebox.showinfo("Authentic", f"✅ VERIFIED: This is an AUTHENTIC invoice issued by The SPARK System.\n\nInvoice ID: {inv_id}")
+                    else:
+                        messagebox.showwarning("Authentic but Not Found", f"⚠️ The Verification ID is mathematically correct, but Invoice #{inv_id} was NOT found in your current database.")
+                else:
+                    messagebox.showerror("FORGED", "❌ WARNING: This invoice appears to be FORGED or modified!")
+            except Exception as e:
+                messagebox.showerror("Error", f"An error occurred during verification: {e}")
+        
+        btn_verify = ttk.Button(frm, text="VERIFY NOW", style="Primary.TButton", command=do_verify)
+        btn_verify.pack(pady=10)
+        ent_id.bind("<Return>", lambda e: do_verify())
+
+    def toggle_theme(self):
+        self.dark_mode = not self.dark_mode
+        if self.dark_mode:
+            bg = "#202124"; fg = "#e8eaed"
+        else:
+            bg = "#f0f2f5"; fg = "#3c4043"
+        try:
+            self.root.configure(bg=bg)
+            self.header.configure(bg="#1a73e8" if not self.dark_mode else "#1a73e8")
+            for c in self.header.winfo_children():
+                if isinstance(c, tk.Label):
+                    c.configure(bg="#1a73e8", fg="white")
+            self.left_f.configure(bg="white" if not self.dark_mode else "#2d2d2d")
+            self.right_f.configure(bg="white" if not self.dark_mode else "#2d2d2d")
+            self.status_f.configure(bg="white" if not self.dark_mode else "#2d2d2d")
+            self.status_label.configure(bg=self.status_f["bg"], fg="#5f6368" if not self.dark_mode else "#cfcfcf")
+        except:
+            pass
+    
+    def on_resize(self, event=None):
+        try:
+            self.bottom_bar.lift()
+        except:
+            pass
+    
+    def update_finalize_state(self, event=None):
+        try:
+            can_finalize = bool(self.current_items) and bool(self.ent_name.get().strip())
+            if hasattr(self, "btn_finalize_left"):
+                if can_finalize:
+                    self.btn_finalize_left.state(["!disabled"])
+                else:
+                    self.btn_finalize_left.state(["disabled"])
+        except:
+            pass
+
+    def open_settings(self):
+        try:
+            win = tk.Toplevel(self.root)
+            win.title("PDF Settings")
+            win.geometry("420x320")
+            frm = tk.Frame(win, padx=12, pady=12)
+            frm.pack(fill="both", expand=True)
+            def add_row(label, var, row):
+                tk.Label(frm, text=label).grid(row=row, column=0, sticky="w", pady=4)
+                e = tk.Entry(frm)
+                e.grid(row=row, column=1, sticky="ew", pady=4)
+                e.insert(0, str(var))
+                return e
+            win.columnconfigure(0, weight=1)
+            frm.columnconfigure(1, weight=1)
+            e_logo = add_row("Logo Width", self.settings.get("logo_width", 30), 0)
+            e_wmw = add_row("Watermark Width", self.settings.get("watermark_width", 120), 1)
+            e_wma = add_row("Watermark Alpha (0-1)", self.settings.get("watermark_alpha", 0.15), 2)
+            e_sigw = add_row("Signature Width", self.settings.get("signature_width", 24), 3)
+            e_boxw = add_row("Signature Box Width", self.settings.get("signature_box_width", 50), 4)
+            e_offx = add_row("Signature Offset X", self.settings.get("signature_offset_x", 0), 5)
+            e_offy = add_row("Signature Offset Y", self.settings.get("signature_offset_y", 18), 6)
+            btns = tk.Frame(frm)
+            btns.grid(row=7, column=0, columnspan=2, pady=12, sticky="e")
+            def do_save():
+                try:
+                    newset = {
+                        "logo_width": float(e_logo.get()),
+                        "watermark_width": float(e_wmw.get()),
+                        "watermark_alpha": float(e_wma.get()),
+                        "signature_width": float(e_sigw.get()),
+                        "signature_box_width": float(e_boxw.get()),
+                        "signature_offset_x": float(e_offx.get()),
+                        "signature_offset_y": float(e_offy.get())
+                    }
+                    self.settings.update(newset)
+                    ok = save_settings(self.settings)
+                    if ok:
+                        messagebox.showinfo("Success", "Settings saved")
+                    else:
+                        messagebox.showerror("Error", "Save failed")
+                except Exception as ex:
+                    messagebox.showerror("Error", f"{ex}")
+            ttk.Button(btns, text="Save", command=do_save).pack(side="right")
+        except:
+            pass
+
+    def ensure_layout(self, event=None):
+        try:
+            self.header.configure(height=80)
+            self.header.pack_propagate(False)
+            self.bottom_bar.lift()
+        except:
+            pass
+
+    def export_monthly_csv(self):
+        year = str(self.ent_year.get())
+        month = self.rep_month.get()
+        out = f"Report_{year}.csv" if month == "All" else f"Report_{year}_{month}.csv"
+        
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            if month == "All":
+                cursor.execute("SELECT * FROM invoices WHERE year = ?", (year,))
+            else:
+                cursor.execute("SELECT * FROM invoices WHERE year = ? AND month = ?", (year, month))
+            rows = cursor.fetchall()
+            conn.close()
+            
+            with open(out, 'w', newline='', encoding='utf-8') as f:
+                w = csv.writer(f)
+                w.writerow(["ID", "Date", "Name", "Items_Details", "Month", "Year", "Total", "Remarks"])
+                for r in rows:
+                    w.writerow(r)
+            messagebox.showinfo("Success", f"CSV exported: {out}")
+            self.open_file(out)
+        except Exception as e:
+            messagebox.showerror("CSV Error", f"Error: {e}")
+
+    def backup_database(self):
+        if not os.path.exists(DB_FILE):
+            messagebox.showwarning("Backup Error", "Database not found.")
+            return
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dest = filedialog.asksaveasfilename(defaultextension=".db", initialfile=f"Backup_{timestamp}.db")
+            if dest:
+                shutil.copy2(DB_FILE, dest)
+                messagebox.showinfo("Backup Success", f"Database backed up to {dest}")
+        except Exception as e:
+            messagebox.showerror("Backup Error", f"Error: {e}")
+
+    def restore_database(self):
+        if not messagebox.askyesno("Confirm Restore", "Overwriting current database! Continue?"):
+            return
+        try:
+            src = filedialog.askopenfilename(filetypes=[("SQLite DB", "*.db"), ("CSV Backup", "*.csv")])
+            if src:
+                if src.endswith(".db"):
+                    shutil.copy2(src, DB_FILE)
+                else:
+                    # Restore from CSV (older backups)
+                    conn = sqlite3.connect(DB_FILE)
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM invoices")
+                    with open(src, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            cursor.execute("INSERT INTO invoices VALUES (?,?,?,?,?,?,?,?)", 
+                                         (row["ID"], row["Date"], row["Name"], row["Items_Details"], row["Month"], row["Year"], float(row["Total"]), row.get("Remarks", "")))
+                    conn.commit()
+                    conn.close()
+                self.load_db_data()
+                messagebox.showinfo("Restore Success", "Database restored.")
+        except Exception as e:
+            messagebox.showerror("Restore Error", f"Error: {e}")
+
+    def open_file(self, path):
+        try:
+            if os.name == "nt":
+                os.startfile(path)
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", path])
+        except:
+            pass
+    
+    def update_status(self):
+        try:
+            count = len(self.db_tree.get_children())
+            total = 0.0
+            for iid in self.db_tree.get_children():
+                vals = self.db_tree.item(iid, "values")
+                if len(vals) >= 5:
+                    try:
+                        total += float(str(vals[4]).replace(",", ""))
+                    except:
+                        pass
+            self.status_label.config(text=f"Records: {count} | Total: {total:,.0f} MMK")
+        except:
+            pass
+        finally:
+            try:
+                self.root.after(1500, self.update_status)
+            except:
+                pass
+
+class LoginPortal:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Login - The SPARK - Billing System")
+        self.root.geometry("1366x768")
+        # Center the window
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        if sw >= 1366 and sh >= 768:
+            self.root.geometry("1366x768+0+0")
+        
+        self.root.configure(bg="#1a237e") # Deep Indigo background
+        
+        # Load credentials
+        self.creds_file = os.path.join(BASE_DIR, "auth.json")
+        self.credentials = self.load_credentials()
+
+        self.setup_login_ui()
+
+    def load_credentials(self):
+        default = {"user": "admin", "pass_hash": hashlib.sha256("Npsi@123".encode()).hexdigest()}
+        if not os.path.exists(self.creds_file):
+            self.save_credentials(default)
+            return default
+        try:
+            with open(self.creds_file, 'r') as f:
+                return json.load(f)
+        except:
+            return default
+
+    def save_credentials(self, data):
+        with open(self.creds_file, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    def setup_login_ui(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+            
+        # Main container with a nice background color
+        container = tk.Frame(self.root, bg="#1a237e")
+        container.place(relx=0.5, rely=0.5, anchor="center")
+        
+        # Login Card
+        card = tk.Frame(container, bg="white", padx=50, pady=50, highlightbackground="#e0e0e0", highlightthickness=1)
+        card.pack()
+        
+        # Add a subtle shadow effect (pseudo-shadow with frames)
+        shadow = tk.Frame(container, bg="#0d1240", height=2)
+        shadow.pack(fill="x")
+
+        # Logo
+        try:
+            if PILImage and ImageTk and LOGO_FILE:
+                img = PILImage.open(LOGO_FILE)
+                img.thumbnail((120, 120))
+                logo_img = ImageTk.PhotoImage(img)
+                logo_lbl = tk.Label(card, image=logo_img, bg="white")
+                logo_lbl.image = logo_img
+                logo_lbl.pack(pady=(0, 20))
+            else:
+                raise ValueError("PIL/ImageTk not found or no logo file")
+        except Exception as e:
+            tk.Label(card, text="THE SPARK", font=("Helvetica", 24, "bold"), fg="#1a73e8", bg="white").pack(pady=(0,20))
+
+        tk.Label(card, text="The SPARK Education Centre", font=("Segoe UI", 16, "bold"), bg="white", fg="#212121").pack(pady=(0,30))
+        tk.Label(card, text="Invoice Billing Management System", font=("Segoe UI", 10, "bold"), bg="white", fg="#1a73e8").pack()
+        
+        # Input fields with better styling
+        input_f = tk.Frame(card, bg="white")
+        input_f.pack(fill="x")
+
+        tk.Label(input_f, text="USERNAME", font=("Segoe UI", 8, "bold"), bg="white", fg="#757575").pack(anchor="w", pady=(0,5))
+        self.ent_user = tk.Entry(input_f, font=("Segoe UI", 13), bd=0, bg="#f5f5f5", insertbackground="#1a73e8", width=35)
+        self.ent_user.pack(fill="x", ipady=10, pady=(0, 20))
+        # underline for entry
+        tk.Frame(input_f, bg="#e0e0e0", height=2).place(relx=0, rely=0.35, relwidth=1)
+
+        tk.Label(input_f, text="PASSWORD", font=("Segoe UI", 8, "bold"), bg="white", fg="#757575").pack(anchor="w", pady=(0,5))
+        self.ent_pass = tk.Entry(input_f, show="●", font=("Segoe UI", 13), bd=0, bg="#f5f5f5", insertbackground="#1a73e8", width=35)
+        self.ent_pass.pack(fill="x", ipady=10, pady=(0, 30))
+        
+        self.ent_user.focus_set()
+        self.ent_pass.bind("<Return>", self.attempt_login)
+
+        # Login Button
+        btn_login = tk.Button(card, text="AUTHENTICATE", font=("Segoe UI", 11, "bold"), bg="#1a73e8", fg="white", 
+                            activebackground="#1669c1", activeforeground="white", bd=0, cursor="hand2", 
+                            command=self.attempt_login, padx=40, pady=12)
+        btn_login.pack(fill="x")
+        
+        # Footer
+        tk.Label(card, text="© 2026 The SPARK Education Centre. All rights reserved.", font=("Segoe UI", 8), bg="white", fg="#9e9e9e").pack(pady=(30,0))
+
+    def attempt_login(self, event=None):
+        username = self.ent_user.get().strip()
+        password = self.ent_pass.get().strip()
+        pass_hash = hashlib.sha256(password.encode()).hexdigest()
+
+        if username == self.credentials["user"] and pass_hash == self.credentials["pass_hash"]:
+            # Clear login UI and start main app
+            for widget in self.root.winfo_children():
+                widget.destroy()
+            EnterpriseApp(self.root)
+        else:
+            # Shake effect or better error message
+            messagebox.showerror("Authentication Failed", "The credentials provided are incorrect.\nPlease try again.")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    LoginPortal(root)
+    root.mainloop()

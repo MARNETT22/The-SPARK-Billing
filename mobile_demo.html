@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="my">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spark Billing - Premium Pro Final Demo</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-dark: #1e40af;
+            --success: #10b981;
+            --danger: #ef4444;
+            --bg-body: #0f172a;
+            --bg-app: #f8fafc;
+            --text-main: #1e293b;
+            --text-muted: #64748b;
+            --card-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            --premium-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1);
+        }
+
+        body { background-color: var(--bg-body); display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; font-family: 'Inter', sans-serif; }
+        .phone-frame { width: 375px; height: 812px; background-color: var(--bg-app); border: 12px solid #1e293b; border-radius: 48px; overflow: hidden; display: flex; flex-direction: column; position: relative; box-shadow: 0 0 50px rgba(0,0,0,0.6); }
+        .phone-notch { width: 160px; height: 30px; background-color: #1e293b; position: absolute; top: 0; left: 50%; transform: translateX(-50%); border-bottom-left-radius: 20px; border-bottom-right-radius: 20px; z-index: 100; }
+
+        .app-header { background: linear-gradient(135deg, var(--primary-dark), var(--primary)); padding: 45px 20px 20px; color: white; text-align: center; }
+        .app-title { font-size: 18px; font-weight: 800; margin-bottom: 12px; }
+        .top-nav { display: flex; gap: 8px; justify-content: center; }
+        .nav-btn { background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.2); color: white; padding: 8px 12px; border-radius: 10px; font-size: 11px; font-weight: 600; cursor: pointer; }
+
+        .scroll-area { flex: 1; overflow-y: auto; padding: 20px; }
+        .section-title { font-size: 15px; font-weight: 700; margin: 20px 0 12px; color: var(--text-main); display: flex; align-items: center; gap: 8px; }
+        .section-title::before { content: ''; width: 4px; height: 18px; background: var(--primary); border-radius: 2px; }
+
+        .card { background: white; border-radius: 16px; padding: 16px; box-shadow: var(--card-shadow); margin-bottom: 20px; border: 1px solid #f1f5f9; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; }
+        input, select { width: 100%; padding: 12px; border: 1.5px solid #e2e8f0; border-radius: 12px; font-size: 14px; box-sizing: border-box; }
+
+        .btn-add { background: var(--primary); color: white; width: 100%; padding: 14px; border: none; border-radius: 12px; font-weight: 700; font-size: 15px; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2); cursor: pointer; }
+
+        .item-row { display: flex; align-items: center; padding: 14px; background: white; border-radius: 14px; margin-bottom: 8px; border: 1px solid #f1f5f9; }
+        .item-info { flex: 1; }
+        .item-name { font-weight: 600; font-size: 14px; color: var(--text-main); }
+        .item-price { font-weight: 700; font-size: 13px; color: var(--success); }
+
+        .btn-mini { padding: 8px 12px; border-radius: 8px; border: none; color: white; font-size: 11px; font-weight: 700; margin-left: 6px; cursor: pointer; }
+        .btn-edit { background: #eff6ff; color: var(--primary); }
+        .btn-del { background: #fef2f2; color: var(--danger); }
+
+        .total-box { text-align: right; padding: 15px; margin: 20px 0; color: var(--success); font-weight: 800; font-size: 20px; }
+
+        .btn-finalize { background: linear-gradient(135deg, #10b981, #059669); color: white; width: 100%; padding: 18px; border: none; border-radius: 16px; font-weight: 800; font-size: 16px; margin-bottom: 10px; cursor: pointer; }
+        .btn-clear { background: #64748b; color: white; width: 100%; padding: 12px; border: none; border-radius: 12px; font-weight: 600; font-size: 14px; cursor: pointer; }
+
+        /* History Screen */
+        #history-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: var(--bg-app); display: none; z-index: 200; flex-direction: column; }
+        .table-header { background: #f1f5f9; padding: 10px 20px; display: flex; justify-content: space-between; font-size: 11px; font-weight: 800; color: var(--text-muted); text-transform: uppercase; }
+        .history-item { background: white; padding: 16px 20px; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between; align-items: center; }
+        .history-info strong { display: block; font-size: 14px; color: var(--text-main); }
+        .history-info small { color: var(--text-muted); font-size: 12px; }
+        .history-bottom { padding: 15px 20px; background: white; border-top: 1px solid #e2e8f0; display: flex; gap: 10px; }
+        .btn-h-action { flex: 1; padding: 14px; border-radius: 12px; border: none; color: white; font-weight: 700; font-size: 13px; cursor: pointer; }
+
+        .toast { position: absolute; bottom: 100px; left: 50%; transform: translateX(-50%); background: #1e293b; color: white; padding: 12px 24px; border-radius: 12px; font-size: 13px; display: none; z-index: 500; }
+    </style>
+</head>
+<body>
+    <div class="phone-frame">
+        <div class="phone-notch"></div>
+        <div id="toast" class="toast">Action Successful!</div>
+
+        <!-- Create Screen -->
+        <div id="create-screen" style="display: flex; flex-direction: column; height: 100%;">
+            <div class="app-header">
+                <div class="app-title">THE SPARK EDUCATION CENTRE</div>
+                <div class="top-nav">
+                    <button class="nav-btn" onclick="showHistory()">HISTORY</button>
+                    <button class="nav-btn">VERIFY</button>
+                    <button class="nav-btn">THEME</button>
+                    <button class="nav-btn">SETTINGS</button>
+                </div>
+            </div>
+
+            <div class="scroll-area">
+                <div class="section-title">1. Create Invoice</div>
+                <div class="card">
+                    <div class="form-group">
+                        <label>Student Name</label>
+                        <input type="text" placeholder="Enter student name">
+                    </div>
+                    
+                    <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                        <div style="flex: 1;"><label>Billing Month</label><select><option>April</option></select></div>
+                        <div style="flex: 1;"><label>Billing Year</label><select><option>2026</option></select></div>
+                    </div>
+
+                    <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                        <div style="flex: 1;"><label>Category</label><select><option>Course Fee</option></select></div>
+                        <div style="flex: 1;"><label>Level/Class</label><select><option>Grade 10</option></select></div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Details (Optional)</label>
+                        <input type="text" placeholder="Additional info...">
+                    </div>
+
+                    <div style="display: flex; gap: 10px; margin-top: 15px;">
+                        <div style="flex: 1;"><label>Amount (MMK)</label><input type="text" value="45,000" style="text-align: right;"></div>
+                        <div style="flex: 1;"><label>Advance (MMK)</label><input type="text" value="5,000" style="text-align: right; background: #fffbeb;"></div>
+                    </div>
+                    <button class="btn-add" style="margin-top: 20px;">+ ADD TO LIST</button>
+                </div>
+
+                <div class="section-title">Current Invoice Items</div>
+                <div id="items-list">
+                    <div class="item-row">
+                        <div class="item-info">
+                            <span class="item-name">Course Fee (Grade 10)</span><br>
+                            <span class="item-price">40,000 MMK</span>
+                        </div>
+                        <button class="btn-mini btn-edit">Edit</button>
+                        <button class="btn-mini btn-del">Del</button>
+                    </div>
+                </div>
+
+                <div class="total-box">TOTAL: 40,000 MMK</div>
+
+                <button class="btn-finalize" onclick="showToast('Invoice Saved & Printing...')">FINALIZE & PRINT INVOICE</button>
+                <button class="btn-clear" onclick="showToast('List Cleared')">CLEAR ALL ITEMS</button>
+                <div style="height: 40px;"></div>
+            </div>
+        </div>
+
+        <!-- History Screen -->
+        <div id="history-screen">
+            <div class="app-header">
+                <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 15px;">
+                    <button class="nav-btn" onclick="hideHistory()">← BACK</button>
+                    <span style="font-size: 18px; font-weight: 800;">Records History</span>
+                </div>
+                <input type="text" placeholder="Search by Name/ID..." style="border-radius: 25px; border: none; padding: 12px 20px;">
+            </div>
+            
+            <div class="table-header">
+                <span>ID / NAME</span>
+                <span>TOTAL</span>
+            </div>
+
+            <div class="scroll-area" style="padding: 0;">
+                <div class="history-item">
+                    <div class="history-info">
+                        <small>202604011243</small>
+                        <strong>Mg Mg</strong>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 15px;">
+                        <div style="text-align: right; font-weight: 800; color: var(--success);">
+                            45,000<br><small style="color: var(--text-muted); font-weight: 400;">MMK</small>
+                        </div>
+                        <button class="btn-mini" style="background: var(--success); color: white; padding: 10px; border-radius: 10px;" onclick="showToast('Printing POS...')">Print</button>
+                    </div>
+                </div>
+                <div class="history-item">
+                    <div class="history-info">
+                        <small>202603310915</small>
+                        <strong>Su Su</strong>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 15px;">
+                        <div style="text-align: right; font-weight: 800; color: var(--success);">
+                            120,000<br><small style="color: var(--text-muted); font-weight: 400;">MMK</small>
+                        </div>
+                        <button class="btn-mini" style="background: var(--success); color: white; padding: 10px; border-radius: 10px;" onclick="showToast('Printing POS...')">Print</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="history-bottom">
+                <button class="btn-h-action" style="background: var(--primary);" onclick="showToast('Generating PDF...')">REPRINT PDF</button>
+                <button class="btn-h-action" style="background: var(--success);" onclick="showToast('Printing POS...')">PRINT POS</button>
+                <button class="btn-h-action" style="background: #fbbf24; color: #78350f;" onclick="showToast('Sharing Image...')">SHARE IMAGE</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function showHistory() { document.getElementById('history-screen').style.display = 'flex'; }
+        function hideHistory() { document.getElementById('history-screen').style.display = 'none'; }
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 2000);
+        }
+    </script>
+</body>
+</html>
