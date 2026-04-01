@@ -1,15 +1,13 @@
 name: Build Android APK
+
 on:
   push:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -24,8 +22,6 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             git \
-            python3 \
-            python3-dev \
             ffmpeg \
             libsdl2-dev \
             libsdl2-image-dev \
@@ -55,17 +51,33 @@ jobs:
             libxslt1-dev \
             openjdk-17-jdk \
             zip \
-            unzip
+            unzip \
+            libncurses5-dev \
+            libncursesw5-dev \
+            libtinfo5 \
+            cmake \
+            libgmp-dev \
+            libmpfr-dev \
+            libmpc-dev
           pip3 install --user --upgrade Cython==0.29.33 buildozer setuptools virtualenv
 
       - name: Build with Buildozer
         run: |
           export PATH=$PATH:$HOME/.local/bin
-          # No cache to avoid corrupted state, build fresh
+          # Force clean buildozer state
+          rm -rf .buildozer
           yes | buildozer -v android debug
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: SparkBilling-APK
           path: bin/*.apk
+
+      - name: Upload Logs on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildozer-logs
+          path: .buildozer/android/platform/build-armeabi-v7a_arm64-v8a/dists/sparkbilling__armeabi-v7a_arm64-v8a/build.log
