@@ -14,7 +14,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
@@ -59,14 +59,14 @@ jobs:
             libgmp-dev \
             libmpfr-dev \
             libmpc-dev
-          pip3 install --user --upgrade Cython==0.29.33 buildozer setuptools virtualenv
+          pip3 install --upgrade pip
+          pip3 install --user --upgrade Cython==0.29.33 buildozer setuptools virtualenv sh
 
       - name: Build with Buildozer
         run: |
           export PATH=$PATH:$HOME/.local/bin
-          # Clean any partial build but keep downloads if possible (though we deleted .buildozer above)
-          # We'll use a more reliable way to run buildozer
-          buildozer android debug || (tail -n 1000 .buildozer/android/platform/build-armeabi-v7a_arm64-v8a/dists/sparkbilling__armeabi-v7a_arm64-v8a/build.log && exit 1)
+          # Use a very clean build command
+          buildozer android debug || (echo "BUILD FAILED. Printing last 500 lines of log:" && tail -n 500 .buildozer/android/platform/build-armeabi-v7a_arm64-v8a/dists/sparkbilling__armeabi-v7a_arm64-v8a/build.log && exit 1)
 
       - name: Upload APK
         if: success()
