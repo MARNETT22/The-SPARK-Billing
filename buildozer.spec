@@ -5,7 +5,7 @@ package.domain = org.spark
 source.dir = .
 source.include_exts = py,png,jpg,kv,db
 version = 1.0.1
-requirements = python3,kivy==2.3.0,fpdf,pillow,pyjnius,android,sqlite3,hostpython3,setuptools,sh
+requirements = python3,kivy,pillow,fpdf,pyjnius,android,sqlite3,hostpython3
 
 # Android permissions (Storage for PDF/JPG export, Bluetooth for POS)
 android.permissions = WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE, MANAGE_EXTERNAL_STORAGE, BLUETOOTH, BLUETOOTH_ADMIN, BLUETOOTH_CONNECT, BLUETOOTH_SCAN, INTERNET
@@ -16,11 +16,11 @@ orientation = portrait
 # Icon & Presplash
 icon.filename = %(source.dir)s/logo.png
 
-# Android API settings
-android.api = 33
+# (Android API 31 is often more stable for builds than 33)
+android.api = 31
 android.minapi = 21
 android.ndk = 25b
-android.sdk = 33
+android.sdk = 31
 android.accept_sdk_license = True
 
 # Architectures (arm64-v8a is mandatory for Play Store, armeabi-v7a for older phones)
